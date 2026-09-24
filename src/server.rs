@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::io::BufReader;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -24,7 +24,7 @@ impl MasterServer {
     }
 }
 
-/* covers partral read for us :) */
+/* covers partial read for us :) */
 pub fn read_stream(reader: &mut BufReader<TcpStream>) -> std::io::Result<Vec<u8>> {
     let mut buffer = vec![];
     let mut temp_buffer = [0; 512];
@@ -38,6 +38,19 @@ pub fn read_stream(reader: &mut BufReader<TcpStream>) -> std::io::Result<Vec<u8>
     }
 
     Ok(buffer)
+}
+
+/* covers partial write for us :) */
+pub fn write_stream(stream: &mut TcpStream, data: &Vec<u8>) -> std::io::Result<()> {
+    let mut total_sent = 0;
+    let data_len = data.len();
+
+    while total_sent < data_len {
+        let sent = stream.write(&data[total_sent..])?;
+        total_sent += sent;
+    }
+
+    Ok(())
 }
 
 #[instrument]
@@ -93,7 +106,20 @@ fn handle_worker_connection(
              * could use timestamp to remove after threshold!   */
         }
         Err(e) => {
-            tracing::info!("{}", e);
+            tracing::error!("{}", e);
+        }
+    }
+}
+
+pub fn tcp_connect(port: u16, write_fn: impl Fn(TcpStream)) {
+    let addr = SocketAddr::new([127, 0, 0, 1].into(), port);
+    let status = std::net::TcpStream::connect(addr);
+    match status {
+        Ok(stream) => {
+            write_fn(stream);
+        }
+        Err(err) => {
+            tracing::error!("{}", err);
         }
     }
 }

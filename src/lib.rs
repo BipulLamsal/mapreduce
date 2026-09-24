@@ -2,6 +2,8 @@ use crate::server::run_master_coordinator;
 use bincode::{Decode, Encode};
 use std::str::FromStr;
 
+mod client;
+mod framework;
 mod server;
 mod worker;
 
@@ -9,8 +11,8 @@ mod worker;
 #[derive(Encode, Decode, Debug, PartialEq)]
 pub enum Node {
     Master,
-    MapWorker,
-    ReduceWorker,
+    Worker,
+    Client,
 }
 
 impl FromStr for Node {
@@ -18,8 +20,7 @@ impl FromStr for Node {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "master" => Ok(Self::Master),
-            "map" => Ok(Self::MapWorker),
-            "reduce" => Ok(Self::ReduceWorker),
+            "worker" => Ok(Self::Worker),
             _ => Err(()),
         }
     }

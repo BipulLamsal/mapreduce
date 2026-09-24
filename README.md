@@ -8,4 +8,6 @@ impl from the paper, to wrap the concept on the head.
 
 - [x] Local Master Server accepts connection workers.   
 - [x] Keep tracks of the workers with some sort of buffer(Hashmap).
+- [x] User framework defination of map
+- [ ] Master to divide into chunks
 - [ ] Implement some kind of queue, so workers picks task when they are free.

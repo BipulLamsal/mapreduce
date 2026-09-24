@@ -45,7 +45,7 @@ fn main() {
 
         let node_type: Node = value
             .parse()
-            .expect("possible values are : master,map or reduce!");
+            .expect("possible values are : master, worker, client!");
 
         app_state.set_type(node_type);
         item = args.next();
