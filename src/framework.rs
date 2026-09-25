@@ -20,6 +20,12 @@ pub struct JobInfo {
     map_fn: u8,
 }
 
+impl JobInfo {
+    pub fn file_path(&self) -> &String {
+        return &self.file;
+    }
+}
+
 use crate::server::{tcp_connect, write_stream};
 
 #[repr(u8)]

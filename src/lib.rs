@@ -1,4 +1,4 @@
-use crate::server::run_master_coordinator;
+use crate::{client::run_client, server::run_master_coordinator};
 use bincode::{Decode, Encode};
 use std::str::FromStr;
 
@@ -6,6 +6,8 @@ mod client;
 mod framework;
 mod server;
 mod worker;
+
+pub const DEFAULT_MASTER_PORT: u16 = 1900;
 
 #[repr(u8)]
 #[derive(Encode, Decode, Debug, PartialEq)]
@@ -30,6 +32,7 @@ impl FromStr for Node {
 pub struct State {
     state_type: Node,
     state_port: u16,
+    connect_port: u16, // applicable to worker
 }
 
 impl State {
@@ -37,6 +40,7 @@ impl State {
         State {
             state_type,
             state_port: port,
+            connect_port: DEFAULT_MASTER_PORT, // default master port
         }
     }
 
@@ -48,11 +52,19 @@ impl State {
         self.state_type = state_type;
     }
 
+    pub fn set_connect(&mut self, connect_port: u16) {
+        self.connect_port = connect_port;
+    }
+
     pub fn serve(&self) {
         // check if its master or worker
         match self.state_type {
             Node::Master => {
                 run_master_coordinator(self.state_port);
+            }
+            Node::Client => run_client(self.state_port),
+            Node::Worker => {
+                run_worker(self.state_port);
             }
 
             _ => unimplemented!(),

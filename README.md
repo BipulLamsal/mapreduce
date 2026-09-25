@@ -9,5 +9,9 @@ impl from the paper, to wrap the concept on the head.
 - [x] Local Master Server accepts connection workers.   
 - [x] Keep tracks of the workers with some sort of buffer(Hashmap).
 - [x] User framework defination of map
-- [ ] Master to divide into chunks
-- [ ] Implement some kind of queue, so workers picks task when they are free.
+- [x] Framework sends map function and file path
+- [x] FIFO scheduler 
+- [x] Master to file divide into chunks metadata
+- [x] Implement some kind of queue, so workers picks task when they are free.
+- [ ] Worker to signal periodically their state 
+- [ ] Map Worker produces intermediate k/v pairs

@@ -1,3 +1,4 @@
+use mapreduce::DEFAULT_MASTER_PORT;
 use mapreduce::Node;
 use mapreduce::State;
 use tracing::Level;
@@ -5,7 +6,7 @@ use tracing::Level;
 fn main() {
     let raw_args = std::env::args();
     let mut args = raw_args.skip(1);
-    let mut app_state = State::new(Node::Master, 1900);
+    let mut app_state = State::new(Node::Master, DEFAULT_MASTER_PORT);
 
     tracing_subscriber::fmt()
         // all spans/events with a level higher than TRACE (e.g, info, warn, etc.)
@@ -36,6 +37,16 @@ fn main() {
                         .parse()
                         .expect("--port <u16 value>");
                     app_state.set_port(number);
+                    item = args.next();
+                    continue;
+                }
+                "--connect" | "-c" => {
+                    let number: u16 = args
+                        .next()
+                        .expect("--connect <u16 value>")
+                        .parse()
+                        .expect("--connect <u16 value>");
+                    app_state.set_connect(number);
                     item = args.next();
                     continue;
                 }
