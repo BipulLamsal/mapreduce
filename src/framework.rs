@@ -24,9 +24,13 @@ impl JobInfo {
     pub fn file_path(&self) -> &String {
         return &self.file;
     }
+
+    pub fn map_fn(&self) -> u8 {
+        return self.map_fn;
+    }
 }
 
-use crate::server::{tcp_connect, write_stream};
+use crate::server::{MasterRecv, tcp_connect, write_stream};
 
 #[repr(u8)]
 #[derive(Clone)]
@@ -43,8 +47,15 @@ impl From<&UserMapFn> for MapFn {
 }
 
 // emit as a closure to run by our worker node
-type EmitFn = dyn FnMut(String, String);
-type MapFn = fn(&str, &str, &mut EmitFn);
+pub type EmitFn = dyn FnMut(String, String);
+pub type MapFn = fn(&str, &str, &mut EmitFn);
+
+pub fn map_fn_from_id(id: u8) -> MapFn {
+    match id {
+        0 => char_map_fn,
+        _ => char_map_fn,
+    }
+}
 
 pub struct Framework {
     map: UserMapFn,
@@ -65,10 +76,10 @@ impl Framework {
     }
 
     pub fn send(&self, port: u16) {
-        let data = JobInfo {
+        let data = MasterRecv::Job(JobInfo {
             file: String::from(self.file.to_str().unwrap()),
             map_fn: self.map.clone() as u8,
-        };
+        });
 
         let encoded = bincode::encode_to_vec(&data, config::standard());
         match encoded {
@@ -89,7 +100,7 @@ impl Framework {
     }
 }
 
-pub fn char_map_fn(key: &str, value: &str, emit: &mut EmitFn) {
+pub fn char_map_fn(_key: &str, value: &str, emit: &mut EmitFn) {
     for i in value.chars() {
         emit(i.to_string(), "1".to_string());
     }

@@ -16,10 +16,11 @@ use crate::worker::{WorkerInfo, WorkerStatus};
 
 // metadata of the file call this a chunk
 #[derive(Debug, Encode, Decode)]
-struct ChunkInfo {
-    path: PathBuf,
-    offset: u64,
-    length: u64,
+pub struct ChunkInfo {
+    pub map_fn: u8,
+    pub path: PathBuf,
+    pub offset: u64,
+    pub length: u64,
 }
 
 enum DispatchEvent {
@@ -29,21 +30,27 @@ enum DispatchEvent {
 
 #[instrument]
 fn shedule_dispatcher(dispatcher_rx: Receiver<DispatchEvent>) {
+    tracing::debug!("Scheduler running");
     let mut worker_queue = VecDeque::new();
     let mut chunk_queue = VecDeque::new();
     while let Ok(event) = dispatcher_rx.recv() {
         match event {
             DispatchEvent::ClientConnection(chunk_info, notify) => {
+                tracing::debug!("event received for client chunk");
                 if let Some(value) = worker_queue.pop_front() {
+                    tracing::debug!("worker availble for chunk");
                     notify.send((chunk_info, value)).unwrap();
                 } else {
+                    tracing::debug!("worker unavailble for chunk");
                     chunk_queue.push_back((chunk_info, notify));
                 }
             }
             DispatchEvent::WorkerAvailable(avl) => {
+                tracing::debug!("event received for availble worker");
                 worker_queue.push_back(avl);
                 if let Some(chunk) = chunk_queue.pop_front() {
                     // we just pushed so there must be something nothing to worry about unwrap here
+                    tracing::debug!("worker availble pulling some chunk");
                     chunk.1.send((chunk.0, avl)).unwrap();
                 }
             }
@@ -53,7 +60,7 @@ fn shedule_dispatcher(dispatcher_rx: Receiver<DispatchEvent>) {
 }
 
 #[derive(Debug, Encode, Decode)]
-enum MasterRecv {
+pub enum MasterRecv {
     Worker(WorkerInfo),
     Job(JobInfo),
 }
@@ -128,15 +135,19 @@ pub fn run_master_coordinator(port: u16) {
      *
      * */
 
-    match listener.accept() {
-        Ok((tcp_stream, addr)) => {
-            // better to use tokio or thread pool here but anyways
-            let _ = std::thread::spawn(move || {
-                handle_worker_connection(master_server.clone(), addr, tcp_stream);
-            });
-        }
-        Err(v) => {
-            tracing::error!("{}", v.to_string());
+    loop {
+        match listener.accept() {
+            Ok((tcp_stream, addr)) => {
+                let master_server = master_server.clone();
+                // better to use tokio or thread pool here but anyways
+                let _ = std::thread::spawn(move || {
+                    handle_worker_connection(master_server.clone(), addr, tcp_stream);
+                });
+            }
+            Err(v) => {
+                tracing::error!("{}", v.to_string());
+                break;
+            }
         }
     }
 }
@@ -146,6 +157,7 @@ fn handle_worker_connection(master_server: Arc<MasterServer>, addr: SocketAddr, 
     tracing::info!("message received");
     let mut buf_reader = BufReader::new(stream);
     let received = read_stream(&mut buf_reader);
+    tracing::debug!("raw bytes received: {:?}", received);
     match received {
         Ok(bytes) => {
             let (decoded, _): (MasterRecv, usize) =
@@ -153,7 +165,8 @@ fn handle_worker_connection(master_server: Arc<MasterServer>, addr: SocketAddr, 
 
             match decoded {
                 MasterRecv::Worker(worker) => {
-                    let port = addr.port();
+                    tracing::info!("Worker Addr: {}", addr.to_string());
+                    let port = worker.port;
                     {
                         let mut map_lock = master_server.map.lock().unwrap(); // TODO handle gracefully
                         let worker_status = worker.status;
@@ -169,11 +182,18 @@ fn handle_worker_connection(master_server: Arc<MasterServer>, addr: SocketAddr, 
                     }
                 }
                 MasterRecv::Job(job) => {
+                    tracing::info!("Client Addr: {}", addr.to_string());
                     let (notify_tx, notify_rx) = std::sync::mpsc::channel();
 
                     let mut buffer = [0; 64]; // 1024/64 = 16 chunks 
                     let path = PathBuf::from(job.file_path());
-                    let mut file_open = std::fs::File::open(path).unwrap();
+                    let mut file_open = match std::fs::File::open(&path) {
+                        Ok(f) => f,
+                        Err(e) => {
+                            tracing::error!("cannot open {:?}: {}", path, e);
+                            return;
+                        }
+                    };
                     let mut offset = 0;
                     loop {
                         let read_bytes = file_open.read(&mut buffer).unwrap();
@@ -184,6 +204,7 @@ fn handle_worker_connection(master_server: Arc<MasterServer>, addr: SocketAddr, 
 
                         let chunk = ChunkInfo {
                             path: PathBuf::from(job.file_path()),
+                            map_fn: job.map_fn(),
                             offset,
                             length: read_bytes as u64,
                         };
@@ -229,5 +250,6 @@ fn handle_chunk_allocation(receiver: Receiver<(ChunkInfo, u16)>) {
         };
 
         tcp_connect(port, write_fn);
+        tracing::info!("Sent chunk to worker : 127.0.0.1:{}", port);
     }
 }
