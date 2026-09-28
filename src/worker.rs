@@ -1,6 +1,7 @@
 use std::{
     io::{BufReader, Read, Seek, SeekFrom, Write},
     net::{SocketAddr, TcpStream},
+    path::PathBuf,
     sync::{Arc, Mutex},
 };
 
@@ -10,7 +11,7 @@ use tracing::instrument;
 use crate::{
     Node,
     framework::map_fn_from_id,
-    server::{ChunkInfo, MasterRecv, read_stream, tcp_connect},
+    server::{ChunkInfo, ChunkResult, MasterRecv, read_stream, tcp_connect, write_stream},
 };
 
 #[derive(Encode, Decode, PartialEq, Debug, Clone, Copy)]
@@ -36,9 +37,17 @@ pub fn run_worker(serv_port: u16, connect_port: u16) {
         port: serv_port,
     }));
 
-    let _ = std::thread::spawn(move || send_heart_beat(worker_state.clone(), connect_port));
-    let listener = std::net::TcpListener::bind(serv_addr)
-        .expect("not able to open the master, check the port?");
+    let heartbeat_state = Arc::clone(&worker_state);
+    let _ = std::thread::spawn(move || send_heart_beat(heartbeat_state, connect_port));
+    let listener = match std::net::TcpListener::bind(serv_addr) {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::error!("cannot bind worker on {}: {}", serv_addr, e);
+            return;
+        }
+    };
+
+    tracing::info!("worker listening on {}", serv_addr);
 
     for stream in listener.incoming() {
         match stream {
@@ -61,7 +70,13 @@ pub fn run_worker(serv_port: u16, connect_port: u16) {
                         }
                     };
                 tracing::info!("chunk received: {:?}", chunk);
-                run_map_chunk(&chunk);
+
+                worker_state.lock().unwrap().status = WorkerStatus::InProgress;
+
+                let result = run_map_chunk(&chunk);
+
+                worker_state.lock().unwrap().status = WorkerStatus::Idle;
+                reply_ack_to_master(&chunk, serv_port, connect_port, result);
             }
             Err(v) => {
                 tracing::error!("{}", v.to_string());
@@ -70,36 +85,80 @@ pub fn run_worker(serv_port: u16, connect_port: u16) {
     }
 }
 
-fn run_map_chunk(chunk: &ChunkInfo) {
+fn reply_ack_to_master(
+    chunk: &ChunkInfo,
+    worker_port: u16,
+    connect_port: u16,
+    result: ChunkResult,
+) {
+    let msg = MasterRecv::TaskDone {
+        job_id: chunk.job_id,
+        chunk_id: chunk.id,
+        worker_port,
+        result,
+    };
+    let encoded = bincode::encode_to_vec(&msg, config::standard()).unwrap();
+    let write_fn = |mut tcp_stream: TcpStream| {
+        if let Err(e) = write_stream(&mut tcp_stream, &encoded) {
+            tracing::error!("failed to ack chunk {}: {}", chunk.id, e);
+        }
+    };
+    tcp_connect(connect_port, write_fn);
+}
+
+fn run_map_chunk(chunk: &ChunkInfo) -> ChunkResult {
     let mut file = match std::fs::File::open(&chunk.path) {
         Ok(f) => f,
         Err(e) => {
-            tracing::error!("cannot open {:?}: {}", chunk.path, e);
-            return;
+            return ChunkResult::Err {
+                reason: format!("cannot open {:?}: {}", chunk.path, e),
+            };
         }
     };
 
     if let Err(e) = file.seek(SeekFrom::Start(chunk.offset)) {
-        tracing::error!("seek failed: {}", e);
-        return;
+        return ChunkResult::Err {
+            reason: format!("seek failed: {}", e),
+        };
     }
 
     let mut buf = vec![0u8; chunk.length as usize];
     if let Err(e) = file.read_exact(&mut buf) {
-        tracing::error!("read chunk failed: {}", e);
-        return;
+        return ChunkResult::Err {
+            reason: format!("read chunk failed: {}", e),
+        };
     }
 
     let value = String::from_utf8_lossy(&buf).to_string();
     let key = format!("{}:{}", chunk.path.display(), chunk.offset);
     let map_fn = map_fn_from_id(chunk.map_fn);
 
-    let mut emit = |k: String, v: String| {
-        // just trace it
-        tracing::info!("emit ({:?}, {:?})", k, v);
+    let intermediate_path = PathBuf::from(format!("intermediate/{}_{}", chunk.job_id, chunk.id));
+
+    let mut emit = {
+        let out_path = intermediate_path.clone();
+        move |k: String, v: String| {
+            tracing::info!("emit ({:?}, {:?})", k, v);
+            if let Some(parent) = out_path.parent()
+                && let Err(e) = std::fs::create_dir_all(parent)
+            {
+                tracing::error!("cannot create intermediate dir: {}", e);
+                return;
+            }
+            if let Err(e) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&out_path)
+                .and_then(|mut f| writeln!(f, "{}\t{}", k, v))
+            {
+                tracing::error!("cannot write intermediate output: {}", e);
+            }
+        }
     };
 
     map_fn(&key, &value, &mut emit);
+
+    ChunkResult::Ok { intermediate_path }
 }
 
 pub fn send_heart_beat(worker_state: Arc<Mutex<WorkerInfo>>, connect_port: u16) {

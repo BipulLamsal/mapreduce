@@ -38,6 +38,12 @@ pub enum UserMapFn {
     CharMap,
 }
 
+#[repr(u8)]
+#[derive(Clone)]
+pub enum UserReduceFn {
+    CharMap,
+}
+
 impl From<&UserMapFn> for MapFn {
     fn from(value: &UserMapFn) -> Self {
         match value {
@@ -59,13 +65,17 @@ pub fn map_fn_from_id(id: u8) -> MapFn {
 
 pub struct Framework {
     map: UserMapFn,
+    reduce: UserReduceFn,
+    num_of_partions: usize,
     file: PathBuf,
 }
 
 impl Framework {
-    pub fn new(map: UserMapFn) -> Self {
+    pub fn new(map: UserMapFn, reduce: UserReduceFn, patitions: usize) -> Self {
         Self {
             map,
+            reduce,
+            num_of_partions: patitions,
             file: PathBuf::new(),
         }
     }

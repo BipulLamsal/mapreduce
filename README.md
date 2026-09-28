@@ -11,4 +11,10 @@ Experimental implemenation of map reduce programming model. It is some sort of `
 - [x] Implement some kind of queue, so workers picks task when they are free.
 - [x] Worker to signal periodically their state 
 - [x] Map Worker produces intermediate k/v pairs
-- [x] e2e test for client master and map worker  
+- [x] e2e test for client master and map worker 
+- [x] chunkstate for bookkeeping on the master   
+- [x] worker assign unique id for job its proccesing
+- [ ] Worker should create R files acting as paritions
+- [ ] Once all workers are done, then only reduce operations needs to be performed
+- [ ] R Reduce Worker are only required, each picking task from each parition of worker
+

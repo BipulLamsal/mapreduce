@@ -1,61 +1,42 @@
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-fn spawn(args: &[&str]) -> Child {
+fn spawn(args: &[&str], piped: bool) -> Child {
     Command::new(env!("CARGO_BIN_EXE_mapreduce"))
         .args(args)
-        .stdout(Stdio::piped())
+        .stdout(if piped { Stdio::piped() } else { Stdio::null() })
         .stderr(Stdio::null())
         .spawn()
-        .expect("spawn binary")
-}
-
-fn wait_for_line<R: std::io::Read>(
-    reader: &mut BufReader<R>,
-    needle: &str,
-    timeout: Duration,
-) -> bool {
-    let start = std::time::Instant::now();
-    let mut line = String::new();
-    while start.elapsed() < timeout {
-        line.clear();
-        match reader.read_line(&mut line) {
-            Ok(0) => std::thread::sleep(Duration::from_millis(50)),
-            Ok(_) => {
-                if line.contains(needle) {
-                    return true;
-                }
-            }
-            Err(_) => std::thread::sleep(Duration::from_millis(50)),
-        }
-    }
-    false
+        .expect("spawn")
 }
 
 #[test]
-fn e2e_worker_gets_chunks_and_emits() {
-    // use uncommon ports to avoid clashing with a dev master
-    let master_port = "1961";
-    let worker_port = "1962";
-
-    let mut master = spawn(&["master", "-p", master_port]);
+fn map_phase_reports_ready_for_reduce() {
+    let mut master = spawn(&["master", "-p", "1981"], true);
+    let mut out = BufReader::new(master.stdout.take().unwrap());
     std::thread::sleep(Duration::from_secs(1));
 
-    let mut worker = spawn(&["worker", "-p", worker_port, "-c", master_port]);
+    let mut worker = spawn(&["worker", "-p", "1982", "-c", "1981"], false);
     std::thread::sleep(Duration::from_secs(2));
 
-    let mut client = spawn(&["client", "-p", master_port]);
-    let status = client.wait().expect("client wait");
-    assert!(status.success(), "client exited fine");
+    let mut client = spawn(&["client", "-p", "1981"], false);
+    assert!(client.wait().unwrap().success());
 
-    // worker should log at least one emit pair
-    let worker_stdout = worker.stdout.take().expect("worker stdout");
-    let mut reader = BufReader::new(worker_stdout);
-    assert!(
-        wait_for_line(&mut reader, "emit", Duration::from_secs(15)),
-        "worker never emitted map output"
-    );
+    let mut line = String::new();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        line.clear();
+        match out.read_line(&mut line) {
+            Ok(0) | Err(_) => panic!("master never reported ready for reduce"),
+            Ok(_) => {
+                if line.contains("Ready for reduce") {
+                    break;
+                }
+            }
+        }
+        assert!(Instant::now() < deadline, "master never reported ready for reduce");
+    }
 
     worker.kill().ok();
     master.kill().ok();
