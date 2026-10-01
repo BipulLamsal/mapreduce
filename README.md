@@ -2,6 +2,10 @@
 
 Experimental implemenation of map reduce programming model. It is some sort of `hello world` program of distbuted systems. And ofc, I haven't looked under the network security and authentication part of real RPC call so this is straight impl from the paper, to wrap the concept on the head. 
 
+
+
+
+
 - [x] Local Master Server accepts connection workers.   
 - [x] Keep tracks of the workers with some sort of buffer(Hashmap).
 - [x] User framework defination of map
@@ -14,7 +18,9 @@ Experimental implemenation of map reduce programming model. It is some sort of `
 - [x] e2e test for client master and map worker 
 - [x] chunkstate for bookkeeping on the master   
 - [x] worker assign unique id for job its proccesing
-- [ ] Worker should create R files acting as paritions
-- [ ] Once all workers are done, then only reduce operations needs to be performed
-- [ ] R Reduce Worker are only required, each picking task from each parition of worker
+- [x] Worker should create R files acting as paritions
+- [x] Once all workers are done, then only reduce operations needs to be performed
+- [x] Group the same paritions files of intermediates to be used by reducer
+- [ ] e2e test for framework
+- [ ] Fault Tolerance?
 

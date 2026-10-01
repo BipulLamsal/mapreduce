@@ -127,3 +127,15 @@ pub fn char_map_fn(_key: &str, value: &str, emit: &mut EmitFn) {
         emit(i.to_string(), "1".to_string());
     }
 }
+
+pub type ReduceFn = fn(&str, Vec<String>) -> String;
+
+pub fn reduce_fn_from_id(id: u8) -> ReduceFn {
+    match id {
+        _ => sum_reduce_fn,
+    }
+}
+
+pub fn sum_reduce_fn(_key: &str, values: Vec<String>) -> String {
+    values.len().to_string()
+}

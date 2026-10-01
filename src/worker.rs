@@ -1,7 +1,9 @@
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::rc::Rc;
+
+const INTERMEDIATE_DIR: &str = "intermediate";
 
 use std::{
     io::{BufReader, Read, Seek, SeekFrom, Write},
@@ -15,10 +17,10 @@ use tracing::instrument;
 
 use crate::{
     Node,
-    framework::map_fn_from_id,
+    framework::{map_fn_from_id, reduce_fn_from_id},
     server::{
-        ChunkId, ChunkInfo, ChunkResult, JobId, MasterRecv, read_stream, tcp_connect,
-        write_stream,
+        ChunkId, ChunkInfo, ChunkResult, JobId, MasterRecv, ReduceInfo, WorkerTask, read_stream,
+        tcp_connect, write_stream,
     },
 };
 
@@ -69,22 +71,32 @@ pub fn run_worker(serv_port: u16, connect_port: u16) {
                         continue;
                     }
                 };
-                let (chunk, _): (ChunkInfo, usize) =
+                let (task, _): (WorkerTask, usize) =
                     match bincode::decode_from_slice(&bytes[..], config::standard()) {
                         Ok(v) => v,
                         Err(e) => {
-                            tracing::error!("decode chunk failed: {}", e);
+                            tracing::error!("decode task failed: {}", e);
                             continue;
                         }
                     };
-                tracing::info!("chunk received: {:?}", chunk);
 
                 worker_state.lock().unwrap().status = WorkerStatus::InProgress;
 
-                let result = run_map_chunk(&chunk);
+                match task {
+                    WorkerTask::Map(chunk) => {
+                        tracing::info!("map chunk received: {:?}", chunk);
+                        let result = run_map_chunk(&chunk);
+                        worker_state.lock().unwrap().status = WorkerStatus::Idle;
+                        reply_ack_to_master(&chunk, serv_port, connect_port, result);
+                    }
+                    WorkerTask::Reduce(info) => {
+                        tracing::info!("reduce received: {:?}", info);
+                        let output = run_reduce_chunk(&info);
 
-                worker_state.lock().unwrap().status = WorkerStatus::Idle;
-                reply_ack_to_master(&chunk, serv_port, connect_port, result);
+                        worker_state.lock().unwrap().status = WorkerStatus::Idle;
+                        reply_reduce_ack(&info, serv_port, connect_port, output);
+                    }
+                }
             }
             Err(v) => {
                 tracing::error!("{}", v.to_string());
@@ -114,6 +126,45 @@ fn reply_ack_to_master(
     tcp_connect(connect_port, write_fn);
 }
 
+fn reply_reduce_ack(info: &ReduceInfo, worker_port: u16, connect_port: u16, output: String) {
+    let msg = MasterRecv::ReduceDone {
+        job_id: info.job_id,
+        partition: info.partition,
+        worker_port,
+        output,
+    };
+    let encoded = bincode::encode_to_vec(&msg, config::standard()).unwrap();
+    tcp_connect(connect_port, |mut tcp_stream: TcpStream| {
+        if let Err(e) = write_stream(&mut tcp_stream, &encoded) {
+            tracing::error!("failed to ack reduce {}: {}", info.partition, e);
+        }
+    });
+}
+
+fn run_reduce_chunk(info: &ReduceInfo) -> String {
+    let reduce_fn = reduce_fn_from_id(info.reduce_fn);
+    let mut groups: HashMap<String, Vec<String>> = HashMap::new();
+
+    for f in &info.files {
+        let Ok(content) = std::fs::read_to_string(f) else {
+            continue;
+        };
+
+        for line in content.lines() {
+            let mut parts = line.splitn(2, '\t');
+            if let (Some(k), Some(v)) = (parts.next(), parts.next()) {
+                groups.entry(k.to_string()).or_default().push(v.to_string());
+            }
+        }
+    }
+
+    let mut out = String::new();
+    for (k, vs) in &groups {
+        out.push_str(&format!("{}\t{}\n", k, reduce_fn(k, vs.clone())));
+    }
+    out
+}
+
 fn run_map_chunk(chunk: &ChunkInfo) -> ChunkResult {
     let mut file = match std::fs::File::open(&chunk.path) {
         Ok(f) => f,
@@ -141,8 +192,6 @@ fn run_map_chunk(chunk: &ChunkInfo) -> ChunkResult {
     let key = format!("{}:{}", chunk.path.display(), chunk.offset);
     let map_fn = map_fn_from_id(chunk.map_fn);
 
-    // `MapFn` takes `&mut dyn FnMut(..) + 'static`, so the emit closure may not
-    // borrow `chunk`; copy the few fields it needs instead.
     let job_id = chunk.job_id;
     let chunk_id = chunk.id;
     let num_partitions = chunk.num_partitions;
@@ -151,7 +200,6 @@ fn run_map_chunk(chunk: &ChunkInfo) -> ChunkResult {
         tracing::error!("cannot create intermediate dir: {}", e);
     }
 
-    // the closure is `move` and `'static`, so the set it writes into is shared
     let intermediates = Rc::new(RefCell::new(HashSet::new()));
     let targets = Rc::clone(&intermediates);
 
@@ -179,8 +227,6 @@ fn run_map_chunk(chunk: &ChunkInfo) -> ChunkResult {
 
     ChunkResult::Ok { intermediates }
 }
-
-const INTERMEDIATE_DIR: &str = "intermediate";
 
 fn partition_path(job_id: JobId, chunk_id: ChunkId, partion_number: u64) -> PathBuf {
     PathBuf::from(format!(
