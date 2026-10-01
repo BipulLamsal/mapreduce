@@ -18,6 +18,8 @@ use std::{net::TcpStream, path::PathBuf};
 pub struct JobInfo {
     file: String,
     map_fn: u8,
+    reduce_fn: u8,
+    num_partitions: usize,
 }
 
 impl JobInfo {
@@ -27,6 +29,14 @@ impl JobInfo {
 
     pub fn map_fn(&self) -> u8 {
         return self.map_fn;
+    }
+
+    pub fn reduce_fn(&self) -> u8 {
+        return self.reduce_fn;
+    }
+
+    pub fn num_partitions(&self) -> usize {
+        return self.num_partitions;
     }
 }
 
@@ -89,6 +99,8 @@ impl Framework {
         let data = MasterRecv::Job(JobInfo {
             file: String::from(self.file.to_str().unwrap()),
             map_fn: self.map.clone() as u8,
+            reduce_fn: self.reduce.clone() as u8,
+            num_partitions: self.num_of_partions,
         });
 
         let encoded = bincode::encode_to_vec(&data, config::standard());

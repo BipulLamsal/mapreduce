@@ -1,3 +1,8 @@
+use std::cell::RefCell;
+use std::collections::HashSet;
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::rc::Rc;
+
 use std::{
     io::{BufReader, Read, Seek, SeekFrom, Write},
     net::{SocketAddr, TcpStream},
@@ -11,7 +16,10 @@ use tracing::instrument;
 use crate::{
     Node,
     framework::map_fn_from_id,
-    server::{ChunkInfo, ChunkResult, MasterRecv, read_stream, tcp_connect, write_stream},
+    server::{
+        ChunkId, ChunkInfo, ChunkResult, JobId, MasterRecv, read_stream, tcp_connect,
+        write_stream,
+    },
 };
 
 #[derive(Encode, Decode, PartialEq, Debug, Clone, Copy)]
@@ -133,32 +141,52 @@ fn run_map_chunk(chunk: &ChunkInfo) -> ChunkResult {
     let key = format!("{}:{}", chunk.path.display(), chunk.offset);
     let map_fn = map_fn_from_id(chunk.map_fn);
 
-    let intermediate_path = PathBuf::from(format!("intermediate/{}_{}", chunk.job_id, chunk.id));
+    // `MapFn` takes `&mut dyn FnMut(..) + 'static`, so the emit closure may not
+    // borrow `chunk`; copy the few fields it needs instead.
+    let job_id = chunk.job_id;
+    let chunk_id = chunk.id;
+    let num_partitions = chunk.num_partitions;
 
-    let mut emit = {
-        let out_path = intermediate_path.clone();
-        move |k: String, v: String| {
-            tracing::info!("emit ({:?}, {:?})", k, v);
-            if let Some(parent) = out_path.parent()
-                && let Err(e) = std::fs::create_dir_all(parent)
-            {
-                tracing::error!("cannot create intermediate dir: {}", e);
-                return;
-            }
-            if let Err(e) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&out_path)
-                .and_then(|mut f| writeln!(f, "{}\t{}", k, v))
-            {
-                tracing::error!("cannot write intermediate output: {}", e);
-            }
+    if let Err(e) = std::fs::create_dir_all(INTERMEDIATE_DIR) {
+        tracing::error!("cannot create intermediate dir: {}", e);
+    }
+
+    // the closure is `move` and `'static`, so the set it writes into is shared
+    let intermediates = Rc::new(RefCell::new(HashSet::new()));
+    let targets = Rc::clone(&intermediates);
+
+    let mut emit = move |k: String, v: String| {
+        let partion_number = get_partion_num(&k, num_partitions);
+
+        tracing::info!("emit ({:?}, {:?})", k, v);
+
+        let path = partition_path(job_id, chunk_id, partion_number);
+        targets.borrow_mut().insert(path.clone());
+
+        if let Err(e) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .and_then(|mut f| writeln!(f, "{}\t{}", k, v))
+        {
+            tracing::error!("cannot write intermediate output: {}", e);
         }
     };
 
     map_fn(&key, &value, &mut emit);
 
-    ChunkResult::Ok { intermediate_path }
+    let intermediates = intermediates.borrow().clone();
+
+    ChunkResult::Ok { intermediates }
+}
+
+const INTERMEDIATE_DIR: &str = "intermediate";
+
+fn partition_path(job_id: JobId, chunk_id: ChunkId, partion_number: u64) -> PathBuf {
+    PathBuf::from(format!(
+        "{}/{}_{}_{}",
+        INTERMEDIATE_DIR, job_id, chunk_id, partion_number
+    ))
 }
 
 pub fn send_heart_beat(worker_state: Arc<Mutex<WorkerInfo>>, connect_port: u16) {
@@ -167,10 +195,16 @@ pub fn send_heart_beat(worker_state: Arc<Mutex<WorkerInfo>>, connect_port: u16) 
             let info = worker_state.lock().unwrap().clone();
             let encoded =
                 bincode::encode_to_vec(MasterRecv::Worker(info), config::standard()).unwrap();
-            tcp_stream.write(&encoded).unwrap();
+            tcp_stream.write_all(&encoded).unwrap();
         };
 
         tcp_connect(connect_port, write_fn);
         std::thread::sleep(std::time::Duration::from_secs(1));
     }
+}
+
+fn get_partion_num(key: &String, no_of_pations: usize) -> u64 {
+    let mut s = DefaultHasher::new();
+    key.hash(&mut s);
+    s.finish() % no_of_pations as u64
 }

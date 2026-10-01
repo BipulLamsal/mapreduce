@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::BufReader;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
@@ -24,6 +24,7 @@ pub struct ChunkInfo {
     pub job_id: JobId,
     pub id: ChunkId,
     pub map_fn: u8,
+    pub num_partitions: usize,
     pub path: PathBuf,
     pub offset: u64,
     pub length: u64,
@@ -31,7 +32,7 @@ pub struct ChunkInfo {
 
 #[derive(Debug, Encode, Decode)]
 pub enum ChunkResult {
-    Ok { intermediate_path: PathBuf },
+    Ok { intermediates: HashSet<PathBuf> },
     Err { reason: String },
 }
 
@@ -91,19 +92,27 @@ pub enum MasterRecv {
 struct JobState {
     total: usize,
     pending: HashMap<ChunkId, ChunkState>,
-    intermediates: HashMap<ChunkId, PathBuf>,
+    intermediates: HashMap<ChunkId, HashSet<PathBuf>>,
 }
 
 impl JobState {
     fn add_chunk(&mut self, chunk_id: ChunkId, chunk: &Arc<ChunkInfo>) {
-        self.pending
-            .insert(chunk_id, ChunkState { chunk: chunk.clone() });
+        self.pending.insert(
+            chunk_id,
+            ChunkState {
+                chunk: chunk.clone(),
+            },
+        );
     }
 
-    fn add_intermediate(&mut self, chunk_id: ChunkId, result: ChunkResult) -> Option<Vec<PathBuf>> {
+    fn add_intermediate(
+        &mut self,
+        chunk_id: ChunkId,
+        result: ChunkResult,
+    ) -> Option<HashSet<PathBuf>> {
         match result {
-            ChunkResult::Ok { intermediate_path } => {
-                self.intermediates.insert(chunk_id, intermediate_path);
+            ChunkResult::Ok { intermediates } => {
+                self.intermediates.insert(chunk_id, intermediates);
                 self.pending.remove(&chunk_id);
             }
             ChunkResult::Err { .. } => {}
@@ -113,10 +122,12 @@ impl JobState {
             return None;
         }
 
-        // drain rather than clone: reduce must be triggered at most once
+        // drain rather than clone: reduce is triggered at most once, and it
+        // needs every chunk's partition files
         Some(
             std::mem::take(&mut self.intermediates)
                 .into_values()
+                .flatten()
                 .collect(),
         )
     }
@@ -154,7 +165,7 @@ impl MasterServer {
         job_id: JobId,
         chunk_id: ChunkId,
         result: ChunkResult,
-    ) -> Option<Vec<PathBuf>> {
+    ) -> Option<HashSet<PathBuf>> {
         let mut jobs = self.jobs.lock().unwrap();
         jobs.get_mut(&job_id)?.add_intermediate(chunk_id, result)
     }
@@ -348,6 +359,7 @@ fn handle_worker_connection(master_server: Arc<MasterServer>, addr: SocketAddr, 
                             id: chunk_id,
                             path: path.clone(),
                             map_fn: job.map_fn(),
+                            num_partitions: job.num_partitions(),
                             offset,
                             length: read_bytes as u64,
                         });
@@ -397,7 +409,7 @@ fn handle_chunk_allocation(receiver: Receiver<(Arc<ChunkInfo>, u16)>) {
     while let Ok((chunk, port)) = receiver.recv() {
         let write_fn = |mut tcp_stream: TcpStream| {
             let encoded = bincode::encode_to_vec(&chunk, config::standard()).unwrap();
-            tcp_stream.write(&encoded).unwrap();
+            tcp_stream.write_all(&encoded).unwrap();
         };
 
         tcp_connect(port, write_fn);
